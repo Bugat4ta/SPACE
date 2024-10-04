@@ -1,0 +1,56 @@
+import numpy as np
+
+G = 6.67430e-11
+M_earth = 5.972e24
+R_earth = 6.371e6
+satellite_altitude = 400000
+satellite_orbit_radius = R_earth + satellite_altitude
+
+def orbital_velocity(mass, orbit_radius):
+    return np.sqrt(G * mass / orbit_radius)
+
+v_orbit = orbital_velocity(M_earth, satellite_orbit_radius)
+T_orbit = 2 * np.pi * satellite_orbit_radius / v_orbit
+
+n = 86400 / T_orbit
+n_deg_per_sec = 360 / T_orbit
+
+inclination = 45.0
+raan = 0.0
+eccentricity = 0.0
+arg_perigee = 0.0
+
+M_0 = 30.0
+
+satellite_number = 99999
+epoch_year = 2024
+epoch_day = 275.123456
+
+time_steps = [0, 500, 1000, 1500, 2000]
+
+def mean_anomaly_at_time(M_0, n_deg_per_sec, t):
+    return (M_0 + n_deg_per_sec * t) % 360
+
+def satellite_position(t, radius, axis='x'):
+    angle_rad = np.deg2rad(mean_anomaly_at_time(M_0, n_deg_per_sec, t))
+    if axis == 'x':
+        return radius * np.cos(angle_rad)
+    elif axis == 'y':
+        return radius * np.sin(angle_rad)
+    elif axis == 'z':
+        return radius * np.cos(angle_rad) * np.sin(angle_rad)
+
+for idx, t in enumerate(time_steps):
+    M_t = mean_anomaly_at_time(M_0, n_deg_per_sec, t)
+    position = satellite_position(t, satellite_orbit_radius, axis='x')
+    
+    tle_line1 = f"1 {satellite_number}U 00000A   {epoch_year % 100:02d}{epoch_day:012.8f}  .00000000  00000-0  00000-0 0  9998"
+    tle_line2 = f"2 {satellite_number} {inclination:8.4f} {raan:8.4f} {int(eccentricity * 1e7):07d} {arg_perigee:8.4f} {M_t:8.4f} {n:11.8f}00001"
+    
+    print(f"Time: {t} seconds")
+    print(f"Mean Anomaly: {M_t:.4f} degrees")
+    print(f"Position along x-axis: {position:.2f} meters")
+    print("Generated TLE:")
+    print(tle_line1)
+    print(tle_line2)
+    print('-' * 40)
