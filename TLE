@@ -40,10 +40,10 @@ def calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1
         time_difference += (2 * np.pi) / n
     return distance, time_difference
 
-manaus = (-3.1342, -60.0217)
-sao_luis = (-2.5394, -44.2826)
-eci_manaus = geo_to_eci(*manaus)
-eci_sao_luis = geo_to_eci(*sao_luis)
+coordinates_1 = (-3.1342, -60.0217)
+coordinates_2 = (-2.5394, -44.2826)
+eci_coordinates_1 = geo_to_eci(*coordinates_1)
+eci_coordinates_2 = geo_to_eci(*coordinates_2)
 
 M1 = 30.0
 M2 = 60.0
