@@ -1,56 +1,59 @@
 import numpy as np
 
-G = 6.67430e-11
-M_earth = 5.972e24
-R_earth = 6.371e6
-satellite_altitude = 400000
-satellite_orbit_radius = R_earth + satellite_altitude
+def geo_to_eci(latitude, longitude):
+    lat_rad = np.radians(latitude)
+    lon_rad = np.radians(longitude)
+    R = 6371e3
+    x = R * np.cos(lat_rad) * np.cos(lon_rad)
+    y = R * np.cos(lat_rad) * np.sin(lon_rad)
+    z = R * np.sin(lat_rad)
+    return np.array([x, y, z])
 
-def orbital_velocity(mass, orbit_radius):
-    return np.sqrt(G * mass / orbit_radius)
+def compute_position(inclination, raan, eccentricity, arg_perigee, mean_anomaly):
+    G = 6.67430e-11
+    M_earth = 5.972e24
+    inclination = np.radians(inclination)
+    raan = np.radians(raan)
+    arg_perigee = np.radians(arg_perigee)
+    n = (2 * np.pi) / 86400
+    a = (G * M_earth / (n ** 2)) ** (1/3)
+    M = np.radians(mean_anomaly)
+    r = a * (1 - eccentricity ** 2) / (1 + eccentricity * np.cos(M))
+    x_orbit = r * np.cos(M)
+    y_orbit = r * np.sin(M)
+    position_eci = np.array([
+        x_orbit * (np.cos(raan) * np.cos(arg_perigee) - np.sin(raan) * np.sin(arg_perigee) * np.cos(inclination)),
+        y_orbit * (np.sin(raan) * np.cos(arg_perigee) + np.cos(raan) * np.sin(arg_perigee) * np.cos(inclination)),
+        y_orbit * (np.sin(arg_perigee) * np.sin(inclination))
+    ])
+    return position_eci
 
-v_orbit = orbital_velocity(M_earth, satellite_orbit_radius)
-T_orbit = 2 * np.pi * satellite_orbit_radius / v_orbit
+def calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1, M2):
+    position1 = compute_position(inclination, raan, eccentricity, arg_perigee, M1)
+    position2 = compute_position(inclination, raan, eccentricity, arg_perigee, M2)
+    distance = np.linalg.norm(position2 - position1)
+    n = (2 * np.pi) / 86400
+    M1_rad = np.radians(M1)
+    M2_rad = np.radians(M2)
+    time_difference = (M2_rad - M1_rad) / n
+    if time_difference < 0:
+        time_difference += (2 * np.pi) / n
+    return distance, time_difference
 
-n = 86400 / T_orbit
-n_deg_per_sec = 360 / T_orbit
+manaus = (-3.1342, -60.0217)
+sao_luis = (-2.5394, -44.2826)
+eci_manaus = geo_to_eci(*manaus)
+eci_sao_luis = geo_to_eci(*sao_luis)
 
-inclination = 45.0
-raan = 0.0
-eccentricity = 0.0
-arg_perigee = 0.0
+M1 = 30.0
+M2 = 60.0
+inclination = 51.6451
+raan = 59.0282
+eccentricity = 0.0003203
+arg_perigee = 353.2771
 
-M_0 = 30.0
+distance, time_difference = calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1, M2)
 
-satellite_number = 99999
-epoch_year = 2024
-epoch_day = 275.123456
+print(f"Distance between points: {distance:.2f} meters")
+print(f"Time to move from M1 to M2: {time_difference:.2f} seconds")
 
-time_steps = [0, 500, 1000, 1500, 2000]
-
-def mean_anomaly_at_time(M_0, n_deg_per_sec, t):
-    return (M_0 + n_deg_per_sec * t) % 360
-
-def satellite_position(t, radius, axis='x'):
-    angle_rad = np.deg2rad(mean_anomaly_at_time(M_0, n_deg_per_sec, t))
-    if axis == 'x':
-        return radius * np.cos(angle_rad)
-    elif axis == 'y':
-        return radius * np.sin(angle_rad)
-    elif axis == 'z':
-        return radius * np.cos(angle_rad) * np.sin(angle_rad)
-
-for idx, t in enumerate(time_steps):
-    M_t = mean_anomaly_at_time(M_0, n_deg_per_sec, t)
-    position = satellite_position(t, satellite_orbit_radius, axis='x')
-    
-    tle_line1 = f"1 {satellite_number}U 00000A   {epoch_year % 100:02d}{epoch_day:012.8f}  .00000000  00000-0  00000-0 0  9998"
-    tle_line2 = f"2 {satellite_number} {inclination:8.4f} {raan:8.4f} {int(eccentricity * 1e7):07d} {arg_perigee:8.4f} {M_t:8.4f} {n:11.8f}00001"
-    
-    print(f"Time: {t} seconds")
-    print(f"Mean Anomaly: {M_t:.4f} degrees")
-    print(f"Position along x-axis: {position:.2f} meters")
-    print("Generated TLE:")
-    print(tle_line1)
-    print(tle_line2)
-    print('-' * 40)
