@@ -77,8 +77,3 @@ print(f"Coordinates 1 Mean Anomaly (M1): {M1:.2f} degrees")
 print(f"Coordinates 2 Mean Anomaly (M2): {M2:.2f} degrees")
 print(f"ECI Distance between points: {distance:.2f} meters")
 print(f"Time to move from M1 to M2: {time_difference:.2f} seconds")
-
-print(f"Coordinates 1 Mean Anomaly (M1): {M1:.2f} degrees")
-print(f"Coordinates 2 Mean Anomaly (M2): {M2:.2f} degrees")
-print(f"ECI Distance between points: {distance:.2f} meters")
-print(f"Time to move from M1 to M2: {time_difference:.2f} seconds")
