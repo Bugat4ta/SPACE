@@ -18,7 +18,7 @@ def compute_position(inclination, raan, eccentricity, arg_perigee, mean_anomaly)
     raan = np.radians(raan)
     arg_perigee = np.radians(arg_perigee)
     
-    n = (2 * np.pi) / 86400 
+    n = (2 * np.pi) / 5400 
     a = (G * M_earth / (n ** 2)) ** (1/3) 
     
     M = np.radians(mean_anomaly)
