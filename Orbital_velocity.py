@@ -46,7 +46,7 @@ def calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1
     
     distance = np.linalg.norm(position2 - position1)
     
-    n = (2 * np.pi) / 86400
+    n = (2 * np.pi) / 5400
     M1_rad = np.radians(M1)
     M2_rad = np.radians(M2)
     
@@ -56,7 +56,6 @@ def calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1
     
     return distance, time_difference
 
-# Prompting user for input
 latitude_1 = float(input("Enter the latitude for point 1 (degrees): "))
 longitude_1 = float(input("Enter the longitude for point 1 (degrees): "))
 latitude_2 = float(input("Enter the latitude for point 2 (degrees): "))
@@ -71,6 +70,13 @@ eccentricity = float(input("Enter the satellite's eccentricity: "))
 arg_perigee = float(input("Enter the argument of perigee (degrees): "))
 
 distance, time_difference = calculate_distance_and_time(inclination, raan, eccentricity, arg_perigee, M1, M2)
+
+print("------------------------------------------------------------------")
+
+print(f"Coordinates 1 Mean Anomaly (M1): {M1:.2f} degrees")
+print(f"Coordinates 2 Mean Anomaly (M2): {M2:.2f} degrees")
+print(f"ECI Distance between points: {distance:.2f} meters")
+print(f"Time to move from M1 to M2: {time_difference:.2f} seconds")
 
 print(f"Coordinates 1 Mean Anomaly (M1): {M1:.2f} degrees")
 print(f"Coordinates 2 Mean Anomaly (M2): {M2:.2f} degrees")
