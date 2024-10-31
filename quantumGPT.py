@@ -10,15 +10,18 @@ class ParallelUniverseSimulator:
         self.state[0] = 1  # Start in state |000...0>
 
     def apply_hadamard(self):
-        for i in range(self.num_qubits):
-            # Apply Hadamard gate to each qubit
-            index = 2**i
-            self.state = np.dot(self.hadamard_matrix(), self.state)
+        # Create the full Hadamard gate for all qubits
+        hadamard_matrix = self.hadamard_matrix(self.num_qubits)
+        # Apply the Hadamard gate to the entire state
+        self.state = np.dot(hadamard_matrix, self.state)
 
-    def hadamard_matrix(self):
-        # 2x2 Hadamard matrix
-        return np.array([[1/np.sqrt(2), 1/np.sqrt(2)],
-                         [1/np.sqrt(2), -1/np.sqrt(2)]])
+    def hadamard_matrix(self, num_qubits):
+        """Create the Hadamard matrix for multiple qubits."""
+        H = np.array([[1, 1], [1, -1]]) / np.sqrt(2)  # 2x2 Hadamard matrix
+        # Kronecker product to get Hadamard for num_qubits
+        for _ in range(num_qubits - 1):
+            H = np.kron(H, np.array([[1, 1], [1, -1]]) / np.sqrt(2))
+        return H
 
     def measure(self):
         # Calculate probabilities for each state
