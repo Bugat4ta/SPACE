@@ -26,45 +26,67 @@ alpha = 0.98
 dt = 0.01
 angle_x, angle_y = 0, 0
 
+# Starting position and waypoint
 starting_latitude = 34.0000
 starting_longitude = -117.0000
+waypoint = (starting_latitude + 0.001, starting_longitude + 0.001)  # Example waypoint
+waypoint_reached = False
 
 kf_velocity_x = KalmanFilter(process_variance=0.1, measurement_variance=1.0)
 kf_velocity_y = KalmanFilter(process_variance=0.1, measurement_variance=1.0)
 
 velocity_x, velocity_y = 0, 0
-position_x, position_y = 0, 0
+position_x, position_y = starting_latitude, starting_longitude
 
 log_file = 'navigation_log.csv'
 
 with open(log_file, mode='w', newline='') as file:
     writer = csv.writer(file)
-    writer.writerow(['Time', 'Speed_X', 'Speed_Y', 'Angle_X', 'Angle_Y', 'Altitude', 'Starting_Latitude', 'Starting_Longitude'])
+    writer.writerow(['Time', 'Speed_X', 'Speed_Y', 'Angle_X', 'Angle_Y', 'Altitude', 'Latitude', 'Longitude'])
 
-def log_data(time_stamp, speed_x, speed_y, angle_x, angle_y, altitude):
+def log_data(time_stamp, speed_x, speed_y, angle_x, angle_y, altitude, latitude, longitude):
     with open(log_file, mode='a', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow([time_stamp, speed_x, speed_y, angle_x, angle_y, altitude, starting_latitude, starting_longitude])
+        writer.writerow([time_stamp, speed_x, speed_y, angle_x, angle_y, altitude, latitude, longitude])
+
+def navigate_to_waypoint():
+    global waypoint_reached, position_x, position_y, angle_x, angle_y
+    distance_to_waypoint = math.sqrt((position_x - waypoint[0])**2 + (position_y - waypoint[1])**2)
+    if distance_to_waypoint < 0.0001:  # Close enough to waypoint
+        waypoint_reached = True
+    else:
+        angle_to_waypoint = math.degrees(math.atan2(waypoint[1] - position_y, waypoint[0] - position_x))
+        angle_diff = angle_to_waypoint - angle_y
+        
+        if angle_diff > 180:
+            angle_diff -= 360
+        elif angle_diff < -180:
+            angle_diff += 360
+        
+        # Simple steering logic
+        if angle_diff > 0:
+            angle_y += 0.5  # Turn right
+        else:
+            angle_y -= 0.5  # Turn left
+
+def update_altitude():
+    global angle_x
+    if angle_x < 0:  # Negative pitch decreases altitude
+        return -0.5
+    elif angle_x > 20:  # High pitch slows altitude increase
+        return 0.5
+    else:  # Maintain altitude or slight increase
+        return 1
 
 try:
     while True:
         try:
             accel_data = mpu.get_accel_data()
-        except Exception as e:
-            print(f"Error reading acceleration data: {e}")
-            continue
-
-        try:
             gyro_data = mpu.get_gyro_data()
-        except Exception as e:
-            print(f"Error reading gyroscope data: {e}")
-            continue
-
-        try:
             altitude = bmp.read_altitude()
         except Exception as e:
-            print(f"Error reading altitude data: {e}")
-            altitude = None
+            print(f"Error reading sensor data: {e}")
+            continue
 
         gyro_x = gyro_data['x'] / 131
         gyro_y = gyro_data['y'] / 131
@@ -78,14 +100,21 @@ try:
         filtered_velocity_x = kf_velocity_x.update(accel_data['x'])
         filtered_velocity_y = kf_velocity_y.update(accel_data['y'])
 
+        # Update positions
         position_x += filtered_velocity_x * dt
         position_y += filtered_velocity_y * dt
 
+        # Navigate to waypoint
+        navigate_to_waypoint()
+
+        # Adjust altitude
+        altitude_change = update_altitude()
+        altitude += altitude_change
+
         current_time = time.time()
+        log_data(current_time, filtered_velocity_x, filtered_velocity_y, angle_x, angle_y, altitude, position_x, position_y)
 
-        log_data(current_time, filtered_velocity_x, filtered_velocity_y, angle_x, angle_y, altitude)
-
-        print(f"Pitch: {angle_x:.2f}° | Roll: {angle_y:.2f}° | Altitude: {altitude if altitude is not None else 'N/A'} m | Starting Location: ({starting_latitude}, {starting_longitude})")
+        print(f"Pitch: {angle_x:.2f}° | Roll: {angle_y:.2f}° | Altitude: {altitude:.2f} m | Position: ({position_x:.6f}, {position_y:.6f}) | Waypoint Reached: {waypoint_reached}")
 
         time.sleep(dt)
 
