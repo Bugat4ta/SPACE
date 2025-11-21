@@ -19,107 +19,165 @@ class KalmanFilter:
         self.error_estimation *= (1 - self.gain)
         return self.estimation
 
+class PID:
+    def __init__(self, kp, ki, kd, output_limits=(-10, 10)):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.integral = 0
+        self.last_error = 0
+        self.output_limits = output_limits
+
+    def compute(self, error, dt):
+        p = self.kp * error
+        self.integral += error * dt
+        i = self.ki * self.integral
+        d = self.kd * (error - self.last_error) / dt
+        self.last_error = error
+        output = p + i + d
+        lo, hi = self.output_limits
+        return max(min(output, hi), lo)
+
 mpu = mpu6050(0x68)
 bmp = BMP388()
 
 alpha = 0.98
 dt = 0.01
-angle_x, angle_y = 0, 0
+angle_x = 0
+angle_y = 0
 
-# Starting position and waypoint
 starting_latitude = 34.0000
 starting_longitude = -117.0000
-waypoint = (starting_latitude + 0.001, starting_longitude + 0.001)  # Example waypoint
+position_x = starting_latitude
+position_y = starting_longitude
+
+waypoint = (starting_latitude + 0.001, starting_longitude + 0.001)
 waypoint_reached = False
 
-kf_velocity_x = KalmanFilter(process_variance=0.1, measurement_variance=1.0)
-kf_velocity_y = KalmanFilter(process_variance=0.1, measurement_variance=1.0)
+velocity_x = 0
+velocity_y = 0
 
-velocity_x, velocity_y = 0, 0
-position_x, position_y = starting_latitude, starting_longitude
+kf_velocity_x = KalmanFilter(0.1, 1.0)
+kf_velocity_y = KalmanFilter(0.1, 1.0)
 
-log_file = 'navigation_log.csv'
+mission_state = "ASCENT"
+crashed = False
+packet_counter = 0
 
-with open(log_file, mode='w', newline='') as file:
+pid_yaw = PID(kp=2.0, ki=0.1, kd=0.7, output_limits=(-5, 5))
+
+last_altitude = None
+altitude_stable_time = 0
+CRASH_ACCEL_THRESHOLD = 35
+CRASH_ALT_TIMEOUT = 3
+
+log_file = "navigation_log.csv"
+with open(log_file, "w", newline='') as file:
     writer = csv.writer(file)
-    writer.writerow(['Time', 'Speed_X', 'Speed_Y', 'Angle_X', 'Angle_Y', 'Altitude', 'Latitude', 'Longitude'])
+    writer.writerow([
+        "Time","Speed_X","Speed_Y","Pitch","Yaw",
+        "Altitude","Latitude","Longitude","MissionState","Crashed"
+    ])
 
-def log_data(time_stamp, speed_x, speed_y, angle_x, angle_y, altitude, latitude, longitude):
-    with open(log_file, mode='a', newline='') as file:
+def build_telemetry_packet(ts, alt, vx, vy, lat, lon, pitch, yaw, state, crash, batt=3.9):
+    global packet_counter
+    packet_counter += 1
+    return (
+        f"$CANSAT,{packet_counter},{ts:.2f},"
+        f"{lat:.6f},{lon:.6f},{alt:.2f},"
+        f"{pitch:.2f},{yaw:.2f},{vx:.3f},{vy:.3f},"
+        f"{batt:.2f},{state},{int(crash)}*"
+    )
+
+def log_data(t, vx, vy, pitch, yaw, alt, lat, lon, state, crash):
+    with open(log_file, "a", newline='') as file:
         writer = csv.writer(file)
-        writer.writerow([time_stamp, speed_x, speed_y, angle_x, angle_y, altitude, latitude, longitude])
+        writer.writerow([t, vx, vy, pitch, yaw, alt, lat, lon, state, crash])
+
+def check_crash(accel, altitude):
+    global last_altitude, altitude_stable_time, crashed, mission_state
+    accel_mag = math.sqrt(accel['x']**2 + accel['y']**2 + accel['z']**2)
+    if accel_mag > CRASH_ACCEL_THRESHOLD:
+        crashed = True
+        mission_state = "CRASHED"
+        return True
+    if last_altitude is None:
+        last_altitude = altitude
+    if abs(altitude - last_altitude) < 0.05:
+        altitude_stable_time += dt
+    else:
+        altitude_stable_time = 0
+        last_altitude = altitude
+    if altitude_stable_time > CRASH_ALT_TIMEOUT:
+        crashed = True
+        mission_state = "CRASHED"
+        return True
+    return False
 
 def navigate_to_waypoint():
-    global waypoint_reached, position_x, position_y, angle_x, angle_y
-    distance_to_waypoint = math.sqrt((position_x - waypoint[0])**2 + (position_y - waypoint[1])**2)
-    if distance_to_waypoint < 0.0001:  # Close enough to waypoint
+    global waypoint_reached, position_x, position_y, angle_y, mission_state
+    if crashed:
+        return
+    dist = math.sqrt((position_x - waypoint[0])**2 + (position_y - waypoint[1])**2)
+    if dist < 0.0001:
         waypoint_reached = True
-    else:
-        angle_to_waypoint = math.degrees(math.atan2(waypoint[1] - position_y, waypoint[0] - position_x))
-        angle_diff = angle_to_waypoint - angle_y
-        
-        if angle_diff > 180:
-            angle_diff -= 360
-        elif angle_diff < -180:
-            angle_diff += 360
-        
-        # Simple steering logic
-        if angle_diff > 0:
-            angle_y += 0.5  # Turn right
-        else:
-            angle_y -= 0.5  # Turn left
-
-def update_altitude():
-    global angle_x
-    if angle_x < 0:  # Negative pitch decreases altitude
-        return -0.5
-    elif angle_x > 20:  # High pitch slows altitude increase
-        return 0.5
-    else:  # Maintain altitude or slight increase
-        return 1
+        mission_state = "WAYPOINT_REACHED"
+        return
+    target_heading = math.degrees(math.atan2(waypoint[1] - position_y, waypoint[0] - position_x))
+    error = target_heading - angle_y
+    if error > 180: error -= 360
+    if error < -180: error += 360
+    turn = pid_yaw.compute(error, dt)
+    angle_y += turn
 
 try:
     while True:
         try:
-            accel_data = mpu.get_accel_data()
-            gyro_data = mpu.get_gyro_data()
+            accel = mpu.get_accel_data()
+            gyro = mpu.get_gyro_data()
             altitude = bmp.read_altitude()
-        except Exception as e:
-            print(f"Error reading sensor data: {e}")
+        except:
             continue
 
-        gyro_x = gyro_data['x'] / 131
-        gyro_y = gyro_data['y'] / 131
+        if not crashed:
+            check_crash(accel, altitude)
 
-        accel_angle_x = math.degrees(math.atan2(accel_data['y'], accel_data['z']))
-        accel_angle_y = math.degrees(math.atan2(accel_data['x'], accel_data['z']))
+        if crashed:
+            velocity_x = 0
+            velocity_y = 0
+
+        gyro_x = gyro['x'] / 131
+        gyro_y = gyro['y'] / 131
+
+        accel_angle_x = math.degrees(math.atan2(accel['y'], accel['z']))
+        accel_angle_y = math.degrees(math.atan2(accel['x'], accel['z']))
 
         angle_x = alpha * (angle_x + gyro_x * dt) + (1 - alpha) * accel_angle_x
         angle_y = alpha * (angle_y + gyro_y * dt) + (1 - alpha) * accel_angle_y
 
-        filtered_velocity_x = kf_velocity_x.update(accel_data['x'])
-        filtered_velocity_y = kf_velocity_y.update(accel_data['y'])
+        filtered_vx = kf_velocity_x.update(accel['x'])
+        filtered_vy = kf_velocity_y.update(accel['y'])
 
-        # Update positions
-        position_x += filtered_velocity_x * dt
-        position_y += filtered_velocity_y * dt
+        if not crashed:
+            position_x += filtered_vx * dt
+            position_y += filtered_vy * dt
 
-        # Navigate to waypoint
         navigate_to_waypoint()
 
-        # Adjust altitude
-        altitude_change = update_altitude()
-        altitude += altitude_change
+        t = time.time()
 
-        current_time = time.time()
-        log_data(current_time, filtered_velocity_x, filtered_velocity_y, angle_x, angle_y, altitude, position_x, position_y)
+        packet = build_telemetry_packet(
+            t, altitude, filtered_vx, filtered_vy,
+            position_x, position_y, angle_x, angle_y,
+            mission_state, crashed
+        )
 
-        print(f"Pitch: {angle_x:.2f}° | Roll: {angle_y:.2f}° | Altitude: {altitude:.2f} m | Position: ({position_x:.6f}, {position_y:.6f}) | Waypoint Reached: {waypoint_reached}")
+        print(packet)
+
+        log_data(t, filtered_vx, filtered_vy, angle_x, angle_y, altitude,
+                 position_x, position_y, mission_state, crashed)
 
         time.sleep(dt)
 
 except KeyboardInterrupt:
-    print("Guidance system terminated.")
-
-finally:
-    pass
+    print("System terminated.")
