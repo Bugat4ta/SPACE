@@ -1,8 +1,54 @@
 import time
 import math
 from machine import I2C, Pin
-from qmi8658 import QMI8658  # QMI8658 driver, drop qmi8658.py alongside this
 
+# ---------------- QMI8658 Driver ----------------
+class QMI8658:
+    def __init__(self, i2c, addr=None):
+        self.i2c = i2c
+        self.addr = addr if addr else 0x6A
+        if self._whoami() != 0x05:
+            raise RuntimeError("QMI8658 not found on I2C bus")
+        self._init_sensor()
+
+    def _whoami(self):
+        return self._read_reg(0x00, 1)[0]
+
+    def _init_sensor(self):
+        self._write_reg(0x0C, 0x60)  # reset
+        time.sleep(0.1)
+        self._write_reg(0x08, 0x03)  # enable accel + gyro
+
+    def _write_reg(self, reg, value):
+        self.i2c.writeto(self.addr, bytes([reg, value]))
+
+    def _read_reg(self, reg, nbytes=1):
+        self.i2c.writeto(self.addr, bytes([reg]))
+        return self.i2c.readfrom(self.addr, nbytes)
+
+    def get_accel_data(self):
+        data = self._read_reg(0x35, 6)
+        x = self._twos_complement(data[1] << 8 | data[0], 16)
+        y = self._twos_complement(data[3] << 8 | data[2], 16)
+        z = self._twos_complement(data[5] << 8 | data[4], 16)
+        scale = 2 / 32768  # ±2g
+        return {'x': x*scale, 'y': y*scale, 'z': z*scale}
+
+    def get_gyro_data(self):
+        data = self._read_reg(0x3B, 6)
+        x = self._twos_complement(data[1] << 8 | data[0], 16)
+        y = self._twos_complement(data[3] << 8 | data[2], 16)
+        z = self._twos_complement(data[5] << 8 | data[4], 16)
+        scale = 250 / 32768  # ±250 dps
+        return {'x': x*scale, 'y': y*scale, 'z': z*scale}
+
+    @staticmethod
+    def _twos_complement(val, bits):
+        if val & (1 << (bits - 1)):
+            val -= (1 << bits)
+        return val
+
+# ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
 
@@ -10,11 +56,7 @@ def meters_per_deg_lat(lat_deg):
     return 111132.954 - 559.822 * math.cos(2*deg2rad(lat_deg)) + 1.175 * math.cos(4*deg2rad(lat_deg))
 
 def meters_per_deg_lon(lat_deg):
-    return (111412.84 * math.cos(deg2rad(lat_deg))
-            - 93.5 * math.cos(3*deg2rad(lat_deg)))
-
-def pressure_to_altitude(p, p0=101325.0, T0=288.15):
-    return 44330.0 * (1.0 - (p / p0) ** (1.0 / 5.255))
+    return (111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg)))
 
 def compute_checksum(payload: str) -> str:
     c = 0
@@ -22,6 +64,20 @@ def compute_checksum(payload: str) -> str:
         c ^= ord(ch)
     return f"{c:02X}"
 
+def body_to_nav(accel_body, roll_deg, pitch_deg):
+    phi = deg2rad(roll_deg)
+    theta = deg2rad(pitch_deg)
+    sphi = math.sin(phi); cphi = math.cos(phi)
+    stheta = math.sin(theta); ctheta = math.cos(theta)
+    a_x = accel_body['x']
+    a_y = accel_body['y']
+    a_z = accel_body['z']
+    a_n =  ctheta * a_x + sphi * stheta * a_y + cphi * stheta * a_z
+    a_e =            cphi * a_y - sphi * a_z
+    a_d = -stheta * a_x + sphi * ctheta * a_y + cphi * ctheta * a_z
+    return {'n': a_n, 'e': a_e, 'd': a_d}
+
+# ---------------- Filters ----------------
 class KalmanFilter:
     def __init__(self, q=0.1, r=1.0, x0=0.0, p0=1.0):
         self.q = q
@@ -60,15 +116,11 @@ class PID:
         lo, hi = self.output_limits
         return max(min(out, hi), lo)
 
-# ---------------- QMI8658 Initialization ----------------
-i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)  # adjust pins for your board
-mpu = QMI8658(i2c)  # auto-detect address 0x6A/0x6B
-
 # ---------------- CanSat Variables ----------------
 alpha_attitude = 0.98
 dt_nominal = 0.01
-start_lat = 34.0000
-start_lon = -117.0000
+start_lat = 34.0
+start_lon = -117.0
 m_per_deg_lat = meters_per_deg_lat(start_lat)
 m_per_deg_lon = meters_per_deg_lon(start_lat)
 
@@ -76,19 +128,17 @@ pos_n = 0.0
 pos_e = 0.0
 vel_n = 0.0
 vel_e = 0.0
-
-kf_vn = KalmanFilter(q=0.05, r=0.5)
-kf_ve = KalmanFilter(q=0.05, r=0.5)
-
 pitch = 0.0
 roll = 0.0
 yaw = 0.0
+
+kf_vn = KalmanFilter(q=0.05, r=0.5)
+kf_ve = KalmanFilter(q=0.05, r=0.5)
 
 last_baro_pressure = None
 sea_level_pressure = 101325.0
 
 CRASH_ACCEL_THRESHOLD = 35.0
-CRASH_ALTITUDE_STABLE_TIMEOUT = 3.0
 crashed = False
 last_altitude = None
 altitude_stable_time = 0.0
@@ -100,8 +150,8 @@ waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
 waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
 
 pid_yaw = PID(kp=2.0, ki=0.05, kd=0.4, output_limits=(-5, 5))
-
 packet_counter = 0
+
 def build_telemetry_packet(ts, alt, vn, ve, lat, lon, pitch, yaw, state, crash, batt=3.9):
     global packet_counter
     packet_counter += 1
@@ -129,29 +179,18 @@ def check_crash(accel, altitude, dt):
         last_altitude = altitude
     return False
 
-def body_to_nav(accel_body, roll_deg, pitch_deg):
-    phi = deg2rad(roll_deg)
-    theta = deg2rad(pitch_deg)
-    sphi = math.sin(phi); cphi = math.cos(phi)
-    stheta = math.sin(theta); ctheta = math.cos(theta)
-    a_x = accel_body['x']
-    a_y = accel_body['y']
-    a_z = accel_body['z']
-    a_n =  ctheta * a_x + sphi * stheta * a_y + cphi * stheta * a_z
-    a_e =            cphi * a_y - sphi * a_z
-    a_d = -stheta * a_x + sphi * ctheta * a_y + cphi * ctheta * a_z
-    return {'n': a_n, 'e': a_e, 'd': a_d}
+# ---------------- I2C and Sensor ----------------
+i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
+mpu = QMI8658(i2c)
 
 # ---------------- Main Loop ----------------
 def main_loop():
     global pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw
-    global last_baro_pressure, sea_level_pressure, crashed, mission_state
+    global crashed, mission_state
 
     last_time = time.monotonic()
 
     try:
-        sea_level_pressure = 101325.0  # default
-
         while True:
             now = time.monotonic()
             dt = now - last_time
@@ -167,40 +206,29 @@ def main_loop():
                 time.sleep(0.05)
                 continue
 
-            # Convert to m/s²
-            if abs(accel['x']) < 20 and abs(accel['y']) < 20 and abs(accel['z']) < 20:
-                accel_m = {k: v * 9.80665 for k, v in accel.items()}
-            else:
-                accel_m = accel.copy()
-
+            # Convert accel to m/s² if small numbers
+            accel_m = {k: v*9.80665 for k,v in accel.items()} if max(abs(v) for v in accel.values()) < 20 else accel.copy()
             gyro_dps = gyro.copy()
 
+            # Complementary filter
             accel_pitch = rad2deg(math.atan2(-accel_m['x'], math.sqrt(accel_m['y']**2 + accel_m['z']**2)))
             accel_roll  = rad2deg(math.atan2(accel_m['y'], accel_m['z']))
+            pitch = alpha_attitude * (pitch + gyro_dps['x'] * dt) + (1-alpha_attitude) * accel_pitch
+            roll  = alpha_attitude * (roll  + gyro_dps['y'] * dt) + (1-alpha_attitude) * accel_roll
+            yaw   = yaw + gyro_dps['z'] * dt
 
-            gyro_x = gyro_dps.get('x', 0.0)
-            gyro_y = gyro_dps.get('y', 0.0)
-            gyro_z = gyro_dps.get('z', 0.0)
-
-            pitch = alpha_attitude * (pitch + gyro_x * dt) + (1 - alpha_attitude) * accel_pitch
-            roll  = alpha_attitude * (roll  + gyro_y * dt) + (1 - alpha_attitude) * accel_roll
-            yaw   = yaw + gyro_z * dt
-
+            # Navigation acceleration
             a_nav = body_to_nav(accel_m, roll, pitch)
-            a_nav['d'] = a_nav['d'] - 9.80665
-
+            a_nav['d'] -= 9.80665
             vel_n += a_nav['n'] * dt
             vel_e += a_nav['e'] * dt
-
             vel_n = kf_vn.update(vel_n)
             vel_e = kf_ve.update(vel_e)
-
             if not crashed:
                 pos_n += vel_n * dt
                 pos_e += vel_e * dt
 
-            altitude = 0.0  # No barometer
-
+            altitude = 0.0  # placeholder
             check_crash(accel_m, altitude, dt)
 
             # Mission state logic
@@ -222,6 +250,7 @@ def main_loop():
             elif mission_state == "WAYPOINT_REACHED" and altitude < 2.0:
                 mission_state = "LANDING"
 
+            # Yaw control
             dx = waypoint_n - pos_n
             dy = waypoint_e - pos_e
             target_heading = rad2deg(math.atan2(dy, dx))
@@ -250,4 +279,3 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
-
