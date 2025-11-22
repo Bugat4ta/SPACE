@@ -1,6 +1,5 @@
 import time
 import math
-import csv
 import traceback
 
 from mpu6050 import mpu6050
@@ -40,7 +39,7 @@ class KalmanFilter:
         return self.x
 
 class PID:
-    def __init__(self, kp, ki, kd, output_limits=(-999,999)):
+    def __init__(self, kp, ki, kd, output_limits=(-999, 999)):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -64,7 +63,6 @@ class PID:
         return max(min(out, hi), lo)
 
 mpu = mpu6050(0x68)
-# bmp = BMP388()  # Removed
 
 alpha_attitude = 0.98
 dt_nominal = 0.01
@@ -100,24 +98,19 @@ waypoint_lon = start_lon + 0.001
 waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
 waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
 
-pid_yaw = PID(kp=2.0, ki=0.05, kd=0.4, output_limits=(-5,5))
-
-log_file = "navigation_log.csv"
-with open(log_file, "w", newline="") as f:
-    csv.writer(f).writerow(["Time", "PosN_m", "PosE_m", "VelN_mps", "VelE_mps",
-                            "Pitch_deg", "Roll_deg", "Yaw_deg", "Altitude_m", "Lat", "Lon", "State", "Crashed"])
+pid_yaw = PID(kp=2.0, ki=0.05, kd=0.4, output_limits=(-5, 5))
 
 packet_counter = 0
 def build_telemetry_packet(ts, alt, vn, ve, lat, lon, pitch, yaw, state, crash, batt=3.9):
     global packet_counter
     packet_counter += 1
-    payload = f"CANSAT,{packet_counter},{ts:.2f},{lat:.6f},{lon:.6f},{alt:.2f},{pitch:.2f},{yaw:.2f},{vn:.3f},{ve:.3f},{batt:.2f},{state},{int(crash)}"
+    payload = (
+        f"CANSAT,{packet_counter},{ts:.2f},{lat:.6f},{lon:.6f},"
+        f"{alt:.2f},{pitch:.2f},{yaw:.2f},{vn:.3f},{ve:.3f},"
+        f"{batt:.2f},{state},{int(crash)}"
+    )
     chk = compute_checksum(payload)
     return f"${payload}*{chk}"
-
-def log_data(t, posn, pose, vn, ve, pitch, roll, yaw, alt, lat, lon, state, crash):
-    with open(log_file, "a", newline="") as f:
-        csv.writer(f).writerow([t, posn, pose, vn, ve, pitch, roll, yaw, alt, lat, lon, state, crash])
 
 def check_crash(accel, altitude, dt):
     global last_altitude, altitude_stable_time, crashed, mission_state
@@ -153,11 +146,9 @@ def main_loop():
     global last_baro_pressure, sea_level_pressure, crashed, mission_state
 
     last_time = time.monotonic()
-    accumulator = 0.0
 
     try:
-        # Initialize sea_level_pressure if needed
-        sea_level_pressure = 101325.0  # default value, no BMP388
+        sea_level_pressure = 101325.0  # default
 
         while True:
             now = time.monotonic()
@@ -169,7 +160,6 @@ def main_loop():
             try:
                 accel = mpu.get_accel_data()
                 gyro = mpu.get_gyro_data()
-                pressure = None  # No BMP388, so pressure unavailable
             except Exception as e:
                 print("Sensor read error:", e)
                 traceback.print_exc()
@@ -190,18 +180,15 @@ def main_loop():
             gyro_y = gyro_dps.get('y', 0.0)
             gyro_z = gyro_dps.get('z', 0.0)
 
-            pitch = alpha_attitude * (pitch + gyro_x * dt) + (1 - alpha_attitude) * accel_pitch
-            roll  = alpha_attitude * (roll  + gyro_y * dt) + (1 - alpha_attitude) * accel_roll
+            pitch = 0.98 * (pitch + gyro_x * dt) + 0.02 * accel_pitch
+            roll  = 0.98 * (roll  + gyro_y * dt) + 0.02 * accel_roll
             yaw   = yaw + gyro_z * dt
 
             a_nav = body_to_nav(accel_m, roll, pitch)
             a_nav['d'] = a_nav['d'] - 9.80665
 
-            a_n = a_nav['n']
-            a_e = a_nav['e']
-
-            vel_n += a_n * dt
-            vel_e += a_e * dt
+            vel_n += a_nav['n'] * dt
+            vel_e += a_nav['e'] * dt
 
             vel_n = kf_vn.update(vel_n)
             vel_e = kf_ve.update(vel_e)
@@ -210,12 +197,11 @@ def main_loop():
                 pos_n += vel_n * dt
                 pos_e += vel_e * dt
 
-            # Simulated altitude (no BMP388)
-            altitude = 0.0
+            altitude = 0.0  # No barometer
 
             check_crash(accel_m, altitude, dt)
 
-            # Mission state machine
+            # Mission logic unchanged
             if mission_state == "BOOT":
                 mission_state = "ASCENT"
             elif mission_state == "ASCENT":
@@ -231,16 +217,11 @@ def main_loop():
             elif mission_state == "NAVIGATION":
                 dx = waypoint_n - pos_n
                 dy = waypoint_e - pos_e
-                dist = math.sqrt(dx*dx + dy*dy)
-                if dist < 10.0:
+                if math.sqrt(dx*dx + dy*dy) < 10.0:
                     mission_state = "WAYPOINT_REACHED"
             elif mission_state == "WAYPOINT_REACHED":
                 if altitude < 2.0:
                     mission_state = "LANDING"
-            elif mission_state == "LANDING":
-                pass
-            elif mission_state == "CRASHED":
-                crashed = True
 
             dx = waypoint_n - pos_n
             dy = waypoint_e - pos_e
@@ -248,8 +229,7 @@ def main_loop():
             yaw_error = target_heading - yaw
             while yaw_error > 180: yaw_error -= 360
             while yaw_error < -180: yaw_error += 360
-            yaw_control = pid_yaw.compute(yaw_error, dt)
-            yaw += yaw_control * dt
+            yaw += pid_yaw.compute(yaw_error, dt) * dt
 
             lat = start_lat + (pos_n / m_per_deg_lat)
             lon = start_lon + (pos_e / m_per_deg_lon)
@@ -257,8 +237,6 @@ def main_loop():
             ts = time.time()
             packet = build_telemetry_packet(ts, altitude, vel_n, vel_e, lat, lon, pitch, yaw, mission_state, crashed)
             print(packet)
-
-            log_data(ts, pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw, altitude, lat, lon, mission_state, crashed)
 
             time.sleep(max(0.0, dt_nominal - (time.monotonic() - now)))
 
