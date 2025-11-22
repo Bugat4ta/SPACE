@@ -16,15 +16,16 @@ class QMI8658:
 
     def write_reg(self, reg, val):
         try:
-            self.i2c.writeto_mem(self.addr, reg, bytes([val]))
+            # Manual register write: send register + value
+            self.i2c.writeto(self.addr, bytes([reg, val]))
         except Exception as e:
             print("I2C write error:", e)
 
     def read_reg(self, reg, nbytes=1):
-        buf = bytearray(nbytes)
         try:
-            self.i2c.readfrom_mem_into(self.addr, reg, buf)
-            return buf
+            # Manual register read: send register address, then read bytes
+            self.i2c.writeto(self.addr, bytes([reg]))
+            return self.i2c.readfrom(self.addr, nbytes)
         except Exception as e:
             print("I2C read error:", e)
             return bytearray(nbytes)
@@ -127,7 +128,7 @@ def check_crash(accel, altitude, dt):
     return False
 
 # ---------------- Initialization ----------------
-# RP2040 hardware I2C
+# Use RP2040 hardware I2C (choose pins that support I2C)
 i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
 mpu = QMI8658(i2c, 0x6B)
 
