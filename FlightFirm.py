@@ -2,40 +2,6 @@ import utime as time
 import math
 import random
 
-# ---------------- Dummy I2C for simulation ----------------
-class DummyI2C:
-    def writeto(self, addr, buf):
-        pass  # do nothing
-
-    def readfrom(self, addr, nbytes):
-        # Return nbytes of simulated sensor data
-        return bytearray([random.randint(0, 255) for _ in range(nbytes)])
-
-# ---------------- QMI8658 Driver ----------------
-class QMI8658:
-    def __init__(self, i2c, addr=0x6B):
-        self.i2c = i2c
-        self.addr = addr
-
-    def write_reg(self, reg, val):
-        self.i2c.writeto(self.addr, bytes([reg, val]))
-
-    def read_reg(self, reg, nbytes=1):
-        self.i2c.writeto(self.addr, bytes([reg]))
-        return self.i2c.readfrom(self.addr, nbytes)
-
-    def get_accel_data(self):
-        # return simulated accelerometer in g
-        return {'x': random.uniform(-0.1, 0.1),
-                'y': random.uniform(-0.1, 0.1),
-                'z': random.uniform(0.9, 1.1)}
-
-    def get_gyro_data(self):
-        # return simulated gyro in degrees/sec
-        return {'x': random.uniform(-1,1),
-                'y': random.uniform(-1,1),
-                'z': random.uniform(-5,5)}
-
 # ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
@@ -52,6 +18,7 @@ def compute_checksum(payload):
         c ^= ord(ch)
     return "%02X" % c
 
+# ---------------- Kalman & PID ----------------
 class KalmanFilter:
     def __init__(self, q=0.1, r=1.0, x0=0.0, p0=1.0):
         self.q, self.r, self.x, self.p = q, r, x0, p0
@@ -115,10 +82,57 @@ def check_crash(accel, altitude, dt):
         last_altitude = altitude
     return False
 
-# ---------------- Initialization ----------------
-i2c = DummyI2C()
-mpu = QMI8658(i2c, 0x6B)
+# ---------------- Sensor Classes ----------------
+# Dummy sensor for simulation
+class DummyQMI8658:
+    def get_accel_data(self):
+        return {'x': random.uniform(-0.1,0.1),
+                'y': random.uniform(-0.1,0.1),
+                'z': random.uniform(0.9,1.1)}
+    def get_gyro_data(self):
+        return {'x': random.uniform(-1,1),
+                'y': random.uniform(-1,1),
+                'z': random.uniform(-5,5)}
 
+# Real sensor
+def get_real_sensor():
+    try:
+        from machine import I2C, Pin
+        i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
+        class QMI8658:
+            def __init__(self, i2c, addr=0x6B):
+                self.i2c = i2c
+                self.addr = addr
+                # Reset and enable sensors
+                self.write_reg(0x7E, 0xB6)
+                time.sleep_ms(50)
+                self.write_reg(0x7C, 0x01)
+                self.write_reg(0x7D, 0x01)
+            def write_reg(self, reg, val):
+                self.i2c.writeto_mem(self.addr, reg, bytes([val]))
+            def read_reg(self, reg, nbytes=1):
+                buf = bytearray(nbytes)
+                self.i2c.readfrom_mem_into(self.addr, reg, buf)
+                return buf
+            def get_accel_data(self):
+                raw = self.read_reg(0x0D,6)
+                x = int.from_bytes(raw[0:2],'little',signed=True)/1000.0
+                y = int.from_bytes(raw[2:4],'little',signed=True)/1000.0
+                z = int.from_bytes(raw[4:6],'little',signed=True)/1000.0
+                return {'x':x,'y':y,'z':z}
+            def get_gyro_data(self):
+                raw = self.read_reg(0x12,6)
+                x = int.from_bytes(raw[0:2],'little',signed=True)/16.4
+                y = int.from_bytes(raw[2:4],'little',signed=True)/16.4
+                z = int.from_bytes(raw[4:6],'little',signed=True)/16.4
+                return {'x':x,'y':y,'z':z}
+        return QMI8658(i2c)
+    except Exception as e:
+        print("Real sensor not found, using simulation:", e)
+        return DummyQMI8658()
+
+# ---------------- Initialization ----------------
+mpu = get_real_sensor()
 alpha_attitude = 0.98
 dt_nominal = 0.01
 start_lat, start_lon = 34.0, -117.0
@@ -137,7 +151,7 @@ waypoint_lat = start_lat + 0.001
 waypoint_lon = start_lon + 0.001
 waypoint_n = (waypoint_lat - start_lat)*m_per_deg_lat
 waypoint_e = (waypoint_lon - start_lon)*m_per_deg_lon
-pid_yaw = PID(2.0, 0.05, 0.4, (-5,5))
+pid_yaw = PID(2.0,0.05,0.4,(-5,5))
 packet_counter = 0
 
 # ---------------- Main Loop ----------------
@@ -147,7 +161,7 @@ def main_loop():
     try:
         while True:
             now = time.ticks_ms()
-            dt = max(time.ticks_diff(now, last_time)/1000.0, dt_nominal)
+            dt = max(time.ticks_diff(now,last_time)/1000.0, dt_nominal)
             last_time = now
 
             accel = mpu.get_accel_data()
@@ -174,7 +188,7 @@ def main_loop():
                 pos_n += vel_n*dt
                 pos_e += vel_e*dt
 
-            altitude = 0.0
+            altitude = 0.0  # replace with real barometer if available
             check_crash(accel_m, altitude, dt)
 
             # Mission state logic
@@ -204,7 +218,6 @@ def main_loop():
             print(packet)
 
             time.sleep(dt_nominal)
-
             if mission_state=="LANDING":
                 print("Mission complete: landing state reached.")
                 break
