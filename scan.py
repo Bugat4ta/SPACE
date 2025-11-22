@@ -1,5 +1,5 @@
-from machine import I2C, Pin
-i2c = I2C(0, scl=Pin(17), sda=Pin(16))
-print("Scanning I2C bus...")
+from machine import Pin, I2C
+
+i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
 devices = i2c.scan()
-print("Found devices:", [hex(d) for d in devices])
+print("I2C devices found:", [hex(d) for d in devices])
