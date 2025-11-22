@@ -2,50 +2,48 @@ import time
 import math
 from machine import I2C, Pin
 
-# -------------------- QMI8658 Driver --------------------
+# ---------------- QMI8658 Driver (inlined) ----------------
 class QMI8658:
-    # Minimal MicroPython driver for QMI8658
-    WHO_AM_I = 0x00
-    ACCEL_X_LSB = 0x12
-    GYRO_X_LSB  = 0x04
-
     def __init__(self, i2c, addr=0x6B):
         self.i2c = i2c
         self.addr = addr
-        if self.whoami() != 0x05:
-            raise Exception("QMI8658 not found at 0x{:02X}".format(addr))
+        # Reset sensor
+        self.write_reg(0x7E, 0xB6)
+        time.sleep(0.05)
+        # Enable accelerometer & gyro
+        self.write_reg(0x7C, 0x01)  # Acc enable
+        self.write_reg(0x7D, 0x01)  # Gyro enable
+    
+    def write_reg(self, reg, val):
+        try:
+            self.i2c.writeto_mem(self.addr, reg, bytes([val]))
+        except Exception as e:
+            print("I2C write error:", e)
 
-    def whoami(self):
-        return self._read_reg(self.WHO_AM_I)
-
-    def _read_reg(self, reg):
-        return self.i2c.readfrom_mem(self.addr, reg, 1)[0]
-
-    def _read_16(self, reg_lsb):
-        lsb = self._read_reg(reg_lsb)
-        msb = self._read_reg(reg_lsb + 1)
-        val = (msb << 8) | lsb
-        if val & 0x8000:
-            val -= 0x10000
-        return val
+    def read_reg(self, reg, nbytes=1):
+        try:
+            return self.i2c.readfrom_mem(self.addr, reg, nbytes)
+        except Exception as e:
+            print("I2C read error:", e)
+            return bytes([0]*nbytes)
 
     def get_accel_data(self):
-        # Returns accel in g
-        return {
-            'x': self._read_16(self.ACCEL_X_LSB) / 1000.0,
-            'y': self._read_16(self.ACCEL_X_LSB + 2) / 1000.0,
-            'z': self._read_16(self.ACCEL_X_LSB + 4) / 1000.0
-        }
+        raw = self.read_reg(0x0D, 6)
+        x = int.from_bytes(raw[0:2], 'little', signed=True) / 1000.0
+        y = int.from_bytes(raw[2:4], 'little', signed=True) / 1000.0
+        z = int.from_bytes(raw[4:6], 'little', signed=True) / 1000.0
+        return {'x': x, 'y': y, 'z': z}
 
     def get_gyro_data(self):
-        # Returns gyro in deg/s
-        return {
-            'x': self._read_16(self.GYRO_X_LSB) / 16.4,
-            'y': self._read_16(self.GYRO_X_LSB + 2) / 16.4,
-            'z': self._read_16(self.GYRO_X_LSB + 4) / 16.4
-        }
+        raw = self.read_reg(0x12, 6)
+        x = int.from_bytes(raw[0:2], 'little', signed=True) / 16.4
+        y = int.from_bytes(raw[2:4], 'little', signed=True) / 16.4
+        z = int.from_bytes(raw[4:6], 'little', signed=True) / 16.4
+        return {'x': x, 'y': y, 'z': z}
 
-# -------------------- Utility Functions --------------------
+# ---------------- End Driver ----------------
+
+# ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
 
@@ -54,6 +52,9 @@ def meters_per_deg_lat(lat_deg):
 
 def meters_per_deg_lon(lat_deg):
     return (111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg)))
+
+def pressure_to_altitude(p, p0=101325.0, T0=288.15):
+    return 44330.0 * (1.0 - (p / p0) ** (1.0 / 5.255))
 
 def compute_checksum(payload: str) -> str:
     c = 0
@@ -83,48 +84,41 @@ class PID:
         self.last_error = None
         self.output_limits = output_limits
     def compute(self, error, dt):
-        if dt <= 0: return 0.0
+        if dt <= 0:
+            return 0.0
         p = self.kp * error
         self.integral += error * dt
         i = self.ki * self.integral
-        d = 0.0 if self.last_error is None else self.kd * ((error - self.last_error) / dt)
+        if self.last_error is None:
+            d = 0.0
+        else:
+            d = self.kd * ((error - self.last_error) / dt)
         self.last_error = error
         out = p + i + d
         lo, hi = self.output_limits
         return max(min(out, hi), lo)
 
-# -------------------- CanSat Variables --------------------
-alpha_attitude = 0.98
-dt_nominal = 0.01
-start_lat = 34.0000
-start_lon = -117.0000
-m_per_deg_lat = meters_per_deg_lat(start_lat)
-m_per_deg_lon = meters_per_deg_lon(start_lat)
-
-pos_n = pos_e = vel_n = vel_e = 0.0
-kf_vn = KalmanFilter(q=0.05, r=0.5)
-kf_ve = KalmanFilter(q=0.05, r=0.5)
-
-pitch = roll = yaw = 0.0
-last_altitude = None
-altitude_stable_time = 0.0
-
-CRASH_ACCEL_THRESHOLD = 35.0
-crashed = False
-mission_state = "BOOT"
-
-waypoint_lat = start_lat + 0.001
-waypoint_lon = start_lon + 0.001
-waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
-waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
-
-pid_yaw = PID(kp=2.0, ki=0.05, kd=0.4, output_limits=(-5,5))
-packet_counter = 0
+def body_to_nav(accel_body, roll_deg, pitch_deg):
+    phi = deg2rad(roll_deg)
+    theta = deg2rad(pitch_deg)
+    sphi = math.sin(phi); cphi = math.cos(phi)
+    stheta = math.sin(theta); ctheta = math.cos(theta)
+    a_x = accel_body['x']
+    a_y = accel_body['y']
+    a_z = accel_body['z']
+    a_n =  ctheta * a_x + sphi * stheta * a_y + cphi * stheta * a_z
+    a_e =            cphi * a_y - sphi * a_z
+    a_d = -stheta * a_x + sphi * ctheta * a_y + cphi * ctheta * a_z
+    return {'n': a_n, 'e': a_e, 'd': a_d}
 
 def build_telemetry_packet(ts, alt, vn, ve, lat, lon, pitch, yaw, state, crash, batt=3.9):
     global packet_counter
     packet_counter += 1
-    payload = f"CANSAT,{packet_counter},{ts:.2f},{lat:.6f},{lon:.6f},{alt:.2f},{pitch:.2f},{yaw:.2f},{vn:.3f},{ve:.3f},{batt:.2f},{state},{int(crash)}"
+    payload = (
+        f"CANSAT,{packet_counter},{ts:.2f},{lat:.6f},{lon:.6f},"
+        f"{alt:.2f},{pitch:.2f},{yaw:.2f},{vn:.3f},{ve:.3f},"
+        f"{batt:.2f},{state},{int(crash)}"
+    )
     chk = compute_checksum(payload)
     return f"${payload}*{chk}"
 
@@ -144,91 +138,117 @@ def check_crash(accel, altitude, dt):
         last_altitude = altitude
     return False
 
-def body_to_nav(accel_body, roll_deg, pitch_deg):
-    phi = deg2rad(roll_deg); theta = deg2rad(pitch_deg)
-    sphi = math.sin(phi); cphi = math.cos(phi)
-    stheta = math.sin(theta); ctheta = math.cos(theta)
-    a_x, a_y, a_z = accel_body['x'], accel_body['y'], accel_body['z']
-    a_n = ctheta*a_x + sphi*stheta*a_y + cphi*stheta*a_z
-    a_e = cphi*a_y - sphi*a_z
-    a_d = -stheta*a_x + sphi*ctheta*a_y + cphi*ctheta*a_z
-    return {'n':a_n, 'e':a_e, 'd':a_d}
-
-# -------------------- I2C & Sensor --------------------
+# ---------------- Initialization ----------------
 i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
 mpu = QMI8658(i2c, addr=0x6B)
 
-# -------------------- Main Loop --------------------
+# CanSat variables
+alpha_attitude = 0.98
+dt_nominal = 0.01
+start_lat = 34.0
+start_lon = -117.0
+m_per_deg_lat = meters_per_deg_lat(start_lat)
+m_per_deg_lon = meters_per_deg_lon(start_lat)
+pos_n = 0.0
+pos_e = 0.0
+vel_n = 0.0
+vel_e = 0.0
+kf_vn = KalmanFilter(q=0.05, r=0.5)
+kf_ve = KalmanFilter(q=0.05, r=0.5)
+pitch = 0.0
+roll = 0.0
+yaw = 0.0
+last_baro_pressure = None
+sea_level_pressure = 101325.0
+CRASH_ACCEL_THRESHOLD = 35.0
+CRASH_ALTITUDE_STABLE_TIMEOUT = 3.0
+crashed = False
+last_altitude = None
+altitude_stable_time = 0.0
+mission_state = "BOOT"
+waypoint_lat = start_lat + 0.001
+waypoint_lon = start_lon + 0.001
+waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
+waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
+pid_yaw = PID(kp=2.0, ki=0.05, kd=0.4, output_limits=(-5, 5))
+packet_counter = 0
+
+# ---------------- Main Loop ----------------
 def main_loop():
     global pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw
-    global crashed, mission_state
+    global last_baro_pressure, sea_level_pressure, crashed, mission_state
 
-    last_time = time.time()
+    last_time = time.monotonic()
     try:
         while True:
-            now = time.time()
+            now = time.monotonic()
             dt = now - last_time
             if dt <= 0: dt = dt_nominal
             last_time = now
 
             try:
                 accel = mpu.get_accel_data()
-                gyro  = mpu.get_gyro_data()
+                gyro = mpu.get_gyro_data()
             except Exception as e:
                 print("Sensor read error:", e)
                 time.sleep(0.05)
                 continue
 
-            accel_m = {k:v*9.80665 for k,v in accel.items()}
+            # Convert to m/s²
+            accel_m = {k: v * 9.80665 for k, v in accel.items()}
+            gyro_dps = gyro.copy()
 
             accel_pitch = rad2deg(math.atan2(-accel_m['x'], math.sqrt(accel_m['y']**2 + accel_m['z']**2)))
             accel_roll  = rad2deg(math.atan2(accel_m['y'], accel_m['z']))
-
-            pitch = alpha_attitude*(pitch + gyro['x']*dt) + (1-alpha_attitude)*accel_pitch
-            roll  = alpha_attitude*(roll  + gyro['y']*dt) + (1-alpha_attitude)*accel_roll
-            yaw  += gyro['z']*dt
+            pitch = alpha_attitude * (pitch + gyro_dps['x']*dt) + (1-alpha_attitude)*accel_pitch
+            roll  = alpha_attitude * (roll + gyro_dps['y']*dt) + (1-alpha_attitude)*accel_roll
+            yaw   += gyro_dps['z']*dt
 
             a_nav = body_to_nav(accel_m, roll, pitch)
             a_nav['d'] -= 9.80665
 
-            vel_n += a_nav['n']*dt
-            vel_e += a_nav['e']*dt
+            vel_n += a_nav['n'] * dt
+            vel_e += a_nav['e'] * dt
             vel_n = kf_vn.update(vel_n)
             vel_e = kf_ve.update(vel_e)
+
             if not crashed:
-                pos_n += vel_n*dt
-                pos_e += vel_e*dt
+                pos_n += vel_n * dt
+                pos_e += vel_e * dt
 
             altitude = 0.0
             check_crash(accel_m, altitude, dt)
 
-            # Mission states
-            if mission_state == "BOOT": mission_state="ASCENT"
-            elif mission_state=="ASCENT" and altitude>50.0: mission_state="APOGEE"
-            elif mission_state=="APOGEE" and altitude<50.0: mission_state="DEPLOY"
+            # Mission state updates (simplified)
+            if mission_state == "BOOT": mission_state = "ASCENT"
+            elif mission_state == "ASCENT" and altitude>50: mission_state="APOGEE"
+            elif mission_state=="APOGEE" and altitude<50: mission_state="DEPLOY"
             elif mission_state=="DEPLOY": mission_state="DESCENT"
             elif mission_state=="DESCENT": mission_state="NAVIGATION"
             elif mission_state=="NAVIGATION":
-                dx=waypoint_n-pos_n; dy=waypoint_e-pos_e
+                dx = waypoint_n - pos_n
+                dy = waypoint_e - pos_e
                 if math.sqrt(dx*dx+dy*dy)<10.0: mission_state="WAYPOINT_REACHED"
             elif mission_state=="WAYPOINT_REACHED" and altitude<2.0: mission_state="LANDING"
 
-            dx=waypoint_n-pos_n; dy=waypoint_e-pos_e
-            target_heading=rad2deg(math.atan2(dy,dx))
-            yaw_error=target_heading-yaw
+            # Yaw control
+            dx = waypoint_n - pos_n
+            dy = waypoint_e - pos_e
+            target_heading = rad2deg(math.atan2(dy, dx))
+            yaw_error = target_heading - yaw
             while yaw_error>180: yaw_error-=360
             while yaw_error<-180: yaw_error+=360
-            yaw += pid_yaw.compute(yaw_error, dt) * dt
+            yaw += pid_yaw.compute(yaw_error, dt)*dt
 
-            lat = start_lat + (pos_n/m_per_deg_lat)
-            lon = start_lon + (pos_e/m_per_deg_lon)
+            lat = start_lat + (pos_n / m_per_deg_lat)
+            lon = start_lon + (pos_e / m_per_deg_lon)
             ts = time.time()
             packet = build_telemetry_packet(ts, altitude, vel_n, vel_e, lat, lon, pitch, yaw, mission_state, crashed)
             print(packet)
 
-            time.sleep(max(0.0, dt_nominal-(time.time()-now)))
+            time.sleep(max(0.0, dt_nominal - (time.monotonic() - now)))
 
-            if mission_state=="LANDING":
+            if mission_state == "LANDING":
                 print("Mission complete: landing state reached.")
                 break
 
@@ -237,5 +257,5 @@ def main_loop():
     except Exception as e:
         print("Fatal error:", e)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main_loop()
