@@ -1,8 +1,7 @@
 import time
 import math
-
-from mpu6050 import mpu6050
-# from bmp388 import BMP388  # Removed
+from machine import I2C, Pin
+from qmi8658 import QMI8658  # QMI8658 driver, drop qmi8658.py alongside this
 
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
@@ -61,8 +60,11 @@ class PID:
         lo, hi = self.output_limits
         return max(min(out, hi), lo)
 
-mpu = mpu6050(0x68)
+# ---------------- QMI8658 Initialization ----------------
+i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)  # adjust pins for your board
+mpu = QMI8658(i2c)  # auto-detect address 0x6A/0x6B
 
+# ---------------- CanSat Variables ----------------
 alpha_attitude = 0.98
 dt_nominal = 0.01
 start_lat = 34.0000
@@ -140,6 +142,7 @@ def body_to_nav(accel_body, roll_deg, pitch_deg):
     a_d = -stheta * a_x + sphi * ctheta * a_y + cphi * ctheta * a_z
     return {'n': a_n, 'e': a_e, 'd': a_d}
 
+# ---------------- Main Loop ----------------
 def main_loop():
     global pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw
     global last_baro_pressure, sea_level_pressure, crashed, mission_state
@@ -164,6 +167,7 @@ def main_loop():
                 time.sleep(0.05)
                 continue
 
+            # Convert to m/s²
             if abs(accel['x']) < 20 and abs(accel['y']) < 20 and abs(accel['z']) < 20:
                 accel_m = {k: v * 9.80665 for k, v in accel.items()}
             else:
@@ -178,8 +182,8 @@ def main_loop():
             gyro_y = gyro_dps.get('y', 0.0)
             gyro_z = gyro_dps.get('z', 0.0)
 
-            pitch = 0.98 * (pitch + gyro_x * dt) + 0.02 * accel_pitch
-            roll  = 0.98 * (roll  + gyro_y * dt) + 0.02 * accel_roll
+            pitch = alpha_attitude * (pitch + gyro_x * dt) + (1 - alpha_attitude) * accel_pitch
+            roll  = alpha_attitude * (roll  + gyro_y * dt) + (1 - alpha_attitude) * accel_roll
             yaw   = yaw + gyro_z * dt
 
             a_nav = body_to_nav(accel_m, roll, pitch)
@@ -199,15 +203,13 @@ def main_loop():
 
             check_crash(accel_m, altitude, dt)
 
-            # Mission logic
+            # Mission state logic
             if mission_state == "BOOT":
                 mission_state = "ASCENT"
-            elif mission_state == "ASCENT":
-                if altitude > 50.0:
-                    mission_state = "APOGEE"
-            elif mission_state == "APOGEE":
-                if altitude < 50.0:
-                    mission_state = "DEPLOY"
+            elif mission_state == "ASCENT" and altitude > 50.0:
+                mission_state = "APOGEE"
+            elif mission_state == "APOGEE" and altitude < 50.0:
+                mission_state = "DEPLOY"
             elif mission_state == "DEPLOY":
                 mission_state = "DESCENT"
             elif mission_state == "DESCENT":
@@ -217,9 +219,8 @@ def main_loop():
                 dy = waypoint_e - pos_e
                 if math.sqrt(dx*dx + dy*dy) < 10.0:
                     mission_state = "WAYPOINT_REACHED"
-            elif mission_state == "WAYPOINT_REACHED":
-                if altitude < 2.0:
-                    mission_state = "LANDING"
+            elif mission_state == "WAYPOINT_REACHED" and altitude < 2.0:
+                mission_state = "LANDING"
 
             dx = waypoint_n - pos_n
             dy = waypoint_e - pos_e
@@ -249,3 +250,4 @@ def main_loop():
 
 if __name__ == "__main__":
     main_loop()
+
