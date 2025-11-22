@@ -4,7 +4,7 @@ import math
 
 # ---------------- I2C Setup ----------------
 i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)  # adjust for your board
-QMI8658_ADDR = 0x6A  # try 0x6B if AD0 high
+QMI8658_ADDR = 0x6B  # correct sensor address
 
 # ---------------- QMI8658 Registers ----------------
 WHO_AM_I = 0x00
@@ -233,3 +233,4 @@ def main_loop():
 
 if __name__=="__main__":
     main_loop()
+
