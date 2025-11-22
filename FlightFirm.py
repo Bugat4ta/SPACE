@@ -16,32 +16,31 @@ class QMI8658:
 
     def write_reg(self, reg, val):
         try:
-            # Manual register write: send register + value
+            # positional arguments only
             self.i2c.writeto(self.addr, bytes([reg, val]))
         except Exception as e:
             print("I2C write error:", e)
 
     def read_reg(self, reg, nbytes=1):
         try:
-            # Manual register read: send register address, then read bytes
-            self.i2c.writeto(self.addr, bytes([reg]))
-            return self.i2c.readfrom(self.addr, nbytes)
+            self.i2c.writeto(self.addr, bytes([reg]))  # send register
+            return self.i2c.readfrom(self.addr, nbytes)  # read bytes
         except Exception as e:
             print("I2C read error:", e)
             return bytearray(nbytes)
 
     def get_accel_data(self):
         raw = self.read_reg(0x0D, 6)
-        x = int.from_bytes(raw[0:2], 'little', signed=True) / 1000.0
-        y = int.from_bytes(raw[2:4], 'little', signed=True) / 1000.0
-        z = int.from_bytes(raw[4:6], 'little', signed=True) / 1000.0
+        x = int.from_bytes(raw[0:2], 'little', signed=True)/1000.0
+        y = int.from_bytes(raw[2:4], 'little', signed=True)/1000.0
+        z = int.from_bytes(raw[4:6], 'little', signed=True)/1000.0
         return {'x': x, 'y': y, 'z': z}
 
     def get_gyro_data(self):
         raw = self.read_reg(0x12, 6)
-        x = int.from_bytes(raw[0:2], 'little', signed=True) / 16.4
-        y = int.from_bytes(raw[2:4], 'little', signed=True) / 16.4
-        z = int.from_bytes(raw[4:6], 'little', signed=True) / 16.4
+        x = int.from_bytes(raw[0:2], 'little', signed=True)/16.4
+        y = int.from_bytes(raw[2:4], 'little', signed=True)/16.4
+        z = int.from_bytes(raw[4:6], 'little', signed=True)/16.4
         return {'x': x, 'y': y, 'z': z}
 
 # ---------------- Helper Functions ----------------
@@ -54,11 +53,11 @@ def meters_per_deg_lat(lat_deg):
 def meters_per_deg_lon(lat_deg):
     return 111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg))
 
-def compute_checksum(payload: str) -> str:
+def compute_checksum(payload):
     c = 0
     for ch in payload:
         c ^= ord(ch)
-    return f"{c:02X}"
+    return "%02X" % c
 
 class KalmanFilter:
     def __init__(self, q=0.1, r=1.0, x0=0.0, p0=1.0):
@@ -68,13 +67,13 @@ class KalmanFilter:
         self.p = p0
     def update(self, z):
         self.p += self.q
-        k = self.p / (self.p + self.r)
-        self.x += k * (z - self.x)
-        self.p *= (1 - k)
+        k = self.p/(self.p+self.r)
+        self.x += k*(z-self.x)
+        self.p *= (1-k)
         return self.x
 
 class PID:
-    def __init__(self, kp, ki, kd, output_limits=(-999, 999)):
+    def __init__(self, kp, ki, kd, output_limits=(-999,999)):
         self.kp = kp
         self.ki = ki
         self.kd = kd
@@ -83,10 +82,10 @@ class PID:
         self.output_limits = output_limits
     def compute(self, error, dt):
         if dt <= 0: return 0.0
-        p = self.kp * error
-        self.integral += error * dt
-        i = self.ki * self.integral
-        d = 0.0 if self.last_error is None else self.kd * ((error - self.last_error)/dt)
+        p = self.kp*error
+        self.integral += error*dt
+        i = self.ki*self.integral
+        d = 0.0 if self.last_error is None else self.kd*((error-self.last_error)/dt)
         self.last_error = error
         out = p + i + d
         lo, hi = self.output_limits
@@ -106,11 +105,11 @@ def body_to_nav(accel_body, roll_deg, pitch_deg):
 def build_telemetry_packet(ts, alt, vn, ve, lat, lon, pitch, yaw, state, crash, batt=3.9):
     global packet_counter
     packet_counter += 1
-    payload = (f"CANSAT,{packet_counter},{ts:.2f},{lat:.6f},{lon:.6f},"
-               f"{alt:.2f},{pitch:.2f},{yaw:.2f},{vn:.3f},{ve:.3f},"
-               f"{batt:.2f},{state},{int(crash)}")
+    payload = "CANSAT,%d,%.2f,%.6f,%.6f,%.2f,%.2f,%.2f,%.3f,%.3f,%.2f,%s,%d" % (
+        packet_counter, ts, lat, lon, alt, pitch, yaw, vn, ve, batt, state, int(crash)
+    )
     chk = compute_checksum(payload)
-    return f"${payload}*{chk}"
+    return "$%s*%s" % (payload, chk)
 
 def check_crash(accel, altitude, dt):
     global last_altitude, altitude_stable_time, crashed, mission_state
@@ -119,7 +118,8 @@ def check_crash(accel, altitude, dt):
         crashed = True
         mission_state = "CRASHED"
         return True
-    if last_altitude is None: last_altitude = altitude
+    if last_altitude is None:
+        last_altitude = altitude
     if abs(altitude - last_altitude) < 0.2:
         altitude_stable_time += dt
     else:
@@ -128,8 +128,7 @@ def check_crash(accel, altitude, dt):
     return False
 
 # ---------------- Initialization ----------------
-# Use RP2040 hardware I2C (choose pins that support I2C)
-i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
+i2c = I2C(0, Pin(17), Pin(16), 400000)  # positional arguments only
 mpu = QMI8658(i2c, 0x6B)
 
 alpha_attitude = 0.98
@@ -148,8 +147,8 @@ altitude_stable_time = 0.0
 mission_state = "BOOT"
 waypoint_lat = start_lat + 0.001
 waypoint_lon = start_lon + 0.001
-waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
-waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
+waypoint_n = (waypoint_lat - start_lat)*m_per_deg_lat
+waypoint_e = (waypoint_lon - start_lon)*m_per_deg_lon
 pid_yaw = PID(2.0, 0.05, 0.4, (-5,5))
 packet_counter = 0
 
@@ -172,7 +171,7 @@ def main_loop():
                 time.sleep_ms(50)
                 continue
 
-            accel_m = {k: v*9.80665 for k,v in accel.items()}
+            accel_m = {k:v*9.80665 for k,v in accel.items()}
             gyro_dps = gyro.copy()
 
             accel_pitch = rad2deg(math.atan2(-accel_m['x'], math.sqrt(accel_m['y']**2 + accel_m['z']**2)))
@@ -212,8 +211,8 @@ def main_loop():
             dy = waypoint_e - pos_e
             target_heading = rad2deg(math.atan2(dy, dx))
             yaw_error = target_heading - yaw
-            while yaw_error>180: yaw_error-=360
-            while yaw_error<-180: yaw_error+=360
+            while yaw_error>180: yaw_error -= 360
+            while yaw_error<-180: yaw_error += 360
             yaw += pid_yaw.compute(yaw_error, dt)*dt
 
             lat = start_lat + pos_n/m_per_deg_lat
