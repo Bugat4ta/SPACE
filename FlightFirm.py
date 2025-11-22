@@ -2,7 +2,7 @@ import utime as time
 import math
 from machine import I2C, Pin
 
-# ---------------- QMI8658 Driver (inlined) ----------------
+# ---------------- QMI8658 Driver (MicroPython-compatible) ----------------
 class QMI8658:
     def __init__(self, i2c, addr=0x6B):
         self.i2c = i2c
@@ -13,7 +13,7 @@ class QMI8658:
         # Enable accelerometer & gyro
         self.write_reg(0x7C, 0x01)  # Acc enable
         self.write_reg(0x7D, 0x01)  # Gyro enable
-    
+
     def write_reg(self, reg, val):
         try:
             self.i2c.writeto_mem(self.addr, reg, bytes([val]))
@@ -21,11 +21,13 @@ class QMI8658:
             print("I2C write error:", e)
 
     def read_reg(self, reg, nbytes=1):
+        buf = bytearray(nbytes)
         try:
-            return self.i2c.readfrom_mem(self.addr, reg, nbytes)
+            self.i2c.readfrom_mem_into(self.addr, reg, buf)
+            return buf
         except Exception as e:
             print("I2C read error:", e)
-            return bytes([0]*nbytes)
+            return bytearray(nbytes)
 
     def get_accel_data(self):
         raw = self.read_reg(0x0D, 6)
@@ -137,7 +139,6 @@ def check_crash(accel, altitude, dt):
 i2c = I2C(0, scl=Pin(17), sda=Pin(16), freq=400000)
 mpu = QMI8658(i2c, addr=0x6B)
 
-# CanSat variables
 alpha_attitude = 0.98
 dt_nominal = 0.01
 start_lat = 34.0
@@ -153,10 +154,7 @@ kf_ve = KalmanFilter(q=0.05, r=0.5)
 pitch = 0.0
 roll = 0.0
 yaw = 0.0
-last_baro_pressure = None
-sea_level_pressure = 101325.0
 CRASH_ACCEL_THRESHOLD = 35.0
-CRASH_ALTITUDE_STABLE_TIMEOUT = 3.0
 crashed = False
 last_altitude = None
 altitude_stable_time = 0.0
@@ -171,13 +169,13 @@ packet_counter = 0
 # ---------------- Main Loop ----------------
 def main_loop():
     global pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw
-    global last_baro_pressure, sea_level_pressure, crashed, mission_state
+    global crashed, mission_state
 
     last_time = time.ticks_ms()
     try:
         while True:
             now = time.ticks_ms()
-            dt = (time.ticks_diff(now, last_time)) / 1000.0
+            dt = time.ticks_diff(now, last_time) / 1000.0
             if dt <= 0: dt = dt_nominal
             last_time = now
 
@@ -211,10 +209,10 @@ def main_loop():
                 pos_n += vel_n * dt
                 pos_e += vel_e * dt
 
-            altitude = 0.0
+            altitude = 0.0  # placeholder
             check_crash(accel_m, altitude, dt)
 
-            # Mission state updates (simplified)
+            # Mission state updates
             if mission_state == "BOOT": mission_state = "ASCENT"
             elif mission_state == "ASCENT" and altitude>50: mission_state="APOGEE"
             elif mission_state=="APOGEE" and altitude<50: mission_state="DEPLOY"
