@@ -1,4 +1,4 @@
-import time
+import utime as time
 import math
 from machine import I2C, Pin
 
@@ -9,7 +9,7 @@ class QMI8658:
         self.addr = addr
         # Reset sensor
         self.write_reg(0x7E, 0xB6)
-        time.sleep(0.05)
+        time.sleep_ms(50)  # 50 ms delay
         # Enable accelerometer & gyro
         self.write_reg(0x7C, 0x01)  # Acc enable
         self.write_reg(0x7D, 0x01)  # Gyro enable
@@ -41,8 +41,6 @@ class QMI8658:
         z = int.from_bytes(raw[4:6], 'little', signed=True) / 16.4
         return {'x': x, 'y': y, 'z': z}
 
-# ---------------- End Driver ----------------
-
 # ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
@@ -51,10 +49,7 @@ def meters_per_deg_lat(lat_deg):
     return 111132.954 - 559.822 * math.cos(2*deg2rad(lat_deg)) + 1.175 * math.cos(4*deg2rad(lat_deg))
 
 def meters_per_deg_lon(lat_deg):
-    return (111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg)))
-
-def pressure_to_altitude(p, p0=101325.0, T0=288.15):
-    return 44330.0 * (1.0 - (p / p0) ** (1.0 / 5.255))
+    return 111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg))
 
 def compute_checksum(payload: str) -> str:
     c = 0
@@ -178,11 +173,11 @@ def main_loop():
     global pos_n, pos_e, vel_n, vel_e, pitch, roll, yaw
     global last_baro_pressure, sea_level_pressure, crashed, mission_state
 
-    last_time = time.monotonic()
+    last_time = time.ticks_ms()
     try:
         while True:
-            now = time.monotonic()
-            dt = now - last_time
+            now = time.ticks_ms()
+            dt = (time.ticks_diff(now, last_time)) / 1000.0
             if dt <= 0: dt = dt_nominal
             last_time = now
 
@@ -191,7 +186,7 @@ def main_loop():
                 gyro = mpu.get_gyro_data()
             except Exception as e:
                 print("Sensor read error:", e)
-                time.sleep(0.05)
+                time.sleep_ms(50)
                 continue
 
             # Convert to m/s²
@@ -246,7 +241,11 @@ def main_loop():
             packet = build_telemetry_packet(ts, altitude, vel_n, vel_e, lat, lon, pitch, yaw, mission_state, crashed)
             print(packet)
 
-            time.sleep(max(0.0, dt_nominal - (time.monotonic() - now)))
+            # Sleep to maintain loop rate
+            elapsed = (time.ticks_diff(time.ticks_ms(), now)) / 1000.0
+            time_to_sleep = dt_nominal - elapsed
+            if time_to_sleep > 0:
+                time.sleep(time_to_sleep)
 
             if mission_state == "LANDING":
                 print("Mission complete: landing state reached.")
