@@ -85,7 +85,7 @@ class PID:
         p = self.kp * error
         self.integral += error * dt
         i = self.ki * self.integral
-        d = 0.0 if self.last_error is None else self.kd * ((error - self.last_error) / dt)
+        d = 0.0 if self.last_error is None else self.kd * ((error - self.last_error)/dt)
         self.last_error = error
         out = p + i + d
         lo, hi = self.output_limits
@@ -97,9 +97,9 @@ def body_to_nav(accel_body, roll_deg, pitch_deg):
     sphi, cphi = math.sin(phi), math.cos(phi)
     stheta, ctheta = math.sin(theta), math.cos(theta)
     a_x, a_y, a_z = accel_body['x'], accel_body['y'], accel_body['z']
-    a_n =  ctheta * a_x + sphi * stheta * a_y + cphi * stheta * a_z
-    a_e =            cphi * a_y - sphi * a_z
-    a_d = -stheta * a_x + sphi * ctheta * a_y + cphi * ctheta * a_z
+    a_n = ctheta*a_x + sphi*stheta*a_y + cphi*stheta*a_z
+    a_e = cphi*a_y - sphi*a_z
+    a_d = -stheta*a_x + sphi*ctheta*a_y + cphi*ctheta*a_z
     return {'n': a_n, 'e': a_e, 'd': a_d}
 
 def build_telemetry_packet(ts, alt, vn, ve, lat, lon, pitch, yaw, state, crash, batt=3.9):
@@ -127,8 +127,9 @@ def check_crash(accel, altitude, dt):
     return False
 
 # ---------------- Initialization ----------------
-# Use positional arguments ONLY (fixes keyword argument error)
-i2c = I2C(0, Pin(17), Pin(16), 400000)
+# Use I2C(id) + init() method to avoid Pin-to-int errors
+i2c = I2C(0)
+i2c.init(scl=Pin(17), sda=Pin(16), freq=400000)
 mpu = QMI8658(i2c, 0x6B)
 
 alpha_attitude = 0.98
@@ -159,7 +160,7 @@ def main_loop():
     try:
         while True:
             now = time.ticks_ms()
-            dt = time.ticks_diff(now, last_time) / 1000.0
+            dt = time.ticks_diff(now, last_time)/1000.0
             dt = dt_nominal if dt <= 0 else dt
             last_time = now
 
@@ -171,14 +172,14 @@ def main_loop():
                 time.sleep_ms(50)
                 continue
 
-            accel_m = {k: v * 9.80665 for k,v in accel.items()}
+            accel_m = {k: v*9.80665 for k,v in accel.items()}
             gyro_dps = gyro.copy()
 
             accel_pitch = rad2deg(math.atan2(-accel_m['x'], math.sqrt(accel_m['y']**2 + accel_m['z']**2)))
-            accel_roll  = rad2deg(math.atan2(accel_m['y'], accel_m['z']))
+            accel_roll = rad2deg(math.atan2(accel_m['y'], accel_m['z']))
             pitch = alpha_attitude*(pitch+gyro_dps['x']*dt)+(1-alpha_attitude)*accel_pitch
-            roll  = alpha_attitude*(roll+gyro_dps['y']*dt)+(1-alpha_attitude)*accel_roll
-            yaw  += gyro_dps['z']*dt
+            roll = alpha_attitude*(roll+gyro_dps['y']*dt)+(1-alpha_attitude)*accel_roll
+            yaw += gyro_dps['z']*dt
 
             a_nav = body_to_nav(accel_m, roll, pitch)
             a_nav['d'] -= 9.80665
@@ -192,7 +193,7 @@ def main_loop():
                 pos_n += vel_n*dt
                 pos_e += vel_e*dt
 
-            altitude = 0.0  # placeholder
+            altitude = 0.0
             check_crash(accel_m, altitude, dt)
 
             # Mission state logic
@@ -221,9 +222,9 @@ def main_loop():
             packet = build_telemetry_packet(ts, altitude, vel_n, vel_e, lat, lon, pitch, yaw, mission_state, crashed)
             print(packet)
 
-            elapsed = (time.ticks_diff(time.ticks_ms(), now))/1000.0
-            time_to_sleep = dt_nominal - elapsed
-            if time_to_sleep > 0: time.sleep(time_to_sleep)
+            elapsed = time.ticks_diff(time.ticks_ms(), now)/1000.0
+            sleep_time = dt_nominal - elapsed
+            if sleep_time>0: time.sleep(sleep_time)
 
             if mission_state=="LANDING":
                 print("Mission complete: landing state reached.")
@@ -234,5 +235,5 @@ def main_loop():
     except Exception as e:
         print("Fatal error:", e)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main_loop()
