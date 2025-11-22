@@ -2,29 +2,28 @@ import utime as time
 import math
 from machine import I2C, Pin
 
-# ---------------- QMI8658 Driver ----------------
+# ---------------- QMI8658 Driver (Software I2C compatible) ----------------
 class QMI8658:
     def __init__(self, i2c, addr=0x6B):
         self.i2c = i2c
         self.addr = addr
-        # Reset sensor
-        self.write_reg(0x7E, 0xB6)
+        self.write_reg(0x7E, 0xB6)  # Reset sensor
         time.sleep_ms(50)
-        # Enable accelerometer & gyro
-        self.write_reg(0x7C, 0x01)
-        self.write_reg(0x7D, 0x01)
+        self.write_reg(0x7C, 0x01)  # Enable accel
+        self.write_reg(0x7D, 0x01)  # Enable gyro
 
     def write_reg(self, reg, val):
         try:
-            self.i2c.writeto_mem(self.addr, reg, bytes([val]))
+            # software I2C: write register + value
+            self.i2c.writeto(self.addr, bytes([reg, val]))
         except Exception as e:
             print("I2C write error:", e)
 
     def read_reg(self, reg, nbytes=1):
-        buf = bytearray(nbytes)
         try:
-            self.i2c.readfrom_mem_into(self.addr, reg, buf)
-            return buf
+            # software I2C: write register first, then read bytes
+            self.i2c.writeto(self.addr, bytes([reg]))
+            return self.i2c.readfrom(self.addr, nbytes)
         except Exception as e:
             print("I2C read error:", e)
             return bytearray(nbytes)
@@ -46,13 +45,10 @@ class QMI8658:
 # ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
-
 def meters_per_deg_lat(lat_deg):
-    return 111132.954 - 559.822 * math.cos(2*deg2rad(lat_deg)) + 1.175 * math.cos(4*deg2rad(lat_deg))
-
+    return 111132.954 - 559.822*math.cos(2*deg2rad(lat_deg)) + 1.175*math.cos(4*deg2rad(lat_deg))
 def meters_per_deg_lon(lat_deg):
-    return 111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg))
-
+    return 111412.84*math.cos(deg2rad(lat_deg)) - 93.5*math.cos(3*deg2rad(lat_deg))
 def compute_checksum(payload: str) -> str:
     c = 0
     for ch in payload:
@@ -61,39 +57,32 @@ def compute_checksum(payload: str) -> str:
 
 class KalmanFilter:
     def __init__(self, q=0.1, r=1.0, x0=0.0, p0=1.0):
-        self.q = q
-        self.r = r
-        self.x = x0
-        self.p = p0
+        self.q = q; self.r = r; self.x = x0; self.p = p0
     def update(self, z):
         self.p += self.q
         k = self.p / (self.p + self.r)
-        self.x += k * (z - self.x)
+        self.x += k*(z - self.x)
         self.p *= (1 - k)
         return self.x
 
 class PID:
-    def __init__(self, kp, ki, kd, output_limits=(-999, 999)):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.integral = 0.0
-        self.last_error = None
+    def __init__(self, kp, ki, kd, output_limits=(-999,999)):
+        self.kp = kp; self.ki = ki; self.kd = kd
+        self.integral = 0.0; self.last_error = None
         self.output_limits = output_limits
     def compute(self, error, dt):
         if dt <= 0: return 0.0
-        p = self.kp * error
-        self.integral += error * dt
-        i = self.ki * self.integral
-        d = 0.0 if self.last_error is None else self.kd * ((error - self.last_error)/dt)
+        p = self.kp*error
+        self.integral += error*dt
+        i = self.ki*self.integral
+        d = 0.0 if self.last_error is None else self.kd*((error - self.last_error)/dt)
         self.last_error = error
         out = p + i + d
         lo, hi = self.output_limits
         return max(min(out, hi), lo)
 
 def body_to_nav(accel_body, roll_deg, pitch_deg):
-    phi = deg2rad(roll_deg)
-    theta = deg2rad(pitch_deg)
+    phi, theta = deg2rad(roll_deg), deg2rad(pitch_deg)
     sphi, cphi = math.sin(phi), math.cos(phi)
     stheta, ctheta = math.sin(theta), math.cos(theta)
     a_x, a_y, a_z = accel_body['x'], accel_body['y'], accel_body['z']
@@ -119,7 +108,7 @@ def check_crash(accel, altitude, dt):
         mission_state = "CRASHED"
         return True
     if last_altitude is None: last_altitude = altitude
-    if abs(altitude - last_altitude) < 0.2:
+    if abs(altitude - last_altitude)<0.2:
         altitude_stable_time += dt
     else:
         altitude_stable_time = 0.0
@@ -127,9 +116,8 @@ def check_crash(accel, altitude, dt):
     return False
 
 # ---------------- Initialization ----------------
-# Use I2C(id) + init() method to avoid Pin-to-int errors
-i2c = I2C(0)
-i2c.init(scl=Pin(17), sda=Pin(16), freq=400000)
+# Software I2C (-1) for RP2040
+i2c = I2C(-1, scl=Pin(17), sda=Pin(16), freq=100000)
 mpu = QMI8658(i2c, 0x6B)
 
 alpha_attitude = 0.98
@@ -148,8 +136,8 @@ altitude_stable_time = 0.0
 mission_state = "BOOT"
 waypoint_lat = start_lat + 0.001
 waypoint_lon = start_lon + 0.001
-waypoint_n = (waypoint_lat - start_lat) * m_per_deg_lat
-waypoint_e = (waypoint_lon - start_lon) * m_per_deg_lon
+waypoint_n = (waypoint_lat - start_lat)*m_per_deg_lat
+waypoint_e = (waypoint_lon - start_lon)*m_per_deg_lon
 pid_yaw = PID(2.0, 0.05, 0.4, (-5,5))
 packet_counter = 0
 
@@ -172,7 +160,7 @@ def main_loop():
                 time.sleep_ms(50)
                 continue
 
-            accel_m = {k: v*9.80665 for k,v in accel.items()}
+            accel_m = {k:v*9.80665 for k,v in accel.items()}
             gyro_dps = gyro.copy()
 
             accel_pitch = rad2deg(math.atan2(-accel_m['x'], math.sqrt(accel_m['y']**2 + accel_m['z']**2)))
