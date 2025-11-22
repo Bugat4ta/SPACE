@@ -1,57 +1,50 @@
 import utime as time
 import math
-from machine import I2C, Pin
+import random
+
+# ---------------- Dummy I2C for simulation ----------------
+class DummyI2C:
+    def writeto(self, addr, buf):
+        pass  # do nothing
+
+    def readfrom(self, addr, nbytes):
+        # Return nbytes of simulated sensor data
+        return bytearray([random.randint(0, 255) for _ in range(nbytes)])
 
 # ---------------- QMI8658 Driver ----------------
 class QMI8658:
     def __init__(self, i2c, addr=0x6B):
         self.i2c = i2c
         self.addr = addr
-        # Reset sensor
-        self.write_reg(0x7E, 0xB6)
-        time.sleep_ms(50)
-        # Enable accelerometer & gyro
-        self.write_reg(0x7C, 0x01)
-        self.write_reg(0x7D, 0x01)
 
     def write_reg(self, reg, val):
-        try:
-            # positional arguments only
-            self.i2c.writeto(self.addr, bytes([reg, val]))
-        except Exception as e:
-            print("I2C write error:", e)
+        self.i2c.writeto(self.addr, bytes([reg, val]))
 
     def read_reg(self, reg, nbytes=1):
-        try:
-            self.i2c.writeto(self.addr, bytes([reg]))  # send register
-            return self.i2c.readfrom(self.addr, nbytes)  # read bytes
-        except Exception as e:
-            print("I2C read error:", e)
-            return bytearray(nbytes)
+        self.i2c.writeto(self.addr, bytes([reg]))
+        return self.i2c.readfrom(self.addr, nbytes)
 
     def get_accel_data(self):
-        raw = self.read_reg(0x0D, 6)
-        x = int.from_bytes(raw[0:2], 'little', signed=True)/1000.0
-        y = int.from_bytes(raw[2:4], 'little', signed=True)/1000.0
-        z = int.from_bytes(raw[4:6], 'little', signed=True)/1000.0
-        return {'x': x, 'y': y, 'z': z}
+        # return simulated accelerometer in g
+        return {'x': random.uniform(-0.1, 0.1),
+                'y': random.uniform(-0.1, 0.1),
+                'z': random.uniform(0.9, 1.1)}
 
     def get_gyro_data(self):
-        raw = self.read_reg(0x12, 6)
-        x = int.from_bytes(raw[0:2], 'little', signed=True)/16.4
-        y = int.from_bytes(raw[2:4], 'little', signed=True)/16.4
-        z = int.from_bytes(raw[4:6], 'little', signed=True)/16.4
-        return {'x': x, 'y': y, 'z': z}
+        # return simulated gyro in degrees/sec
+        return {'x': random.uniform(-1,1),
+                'y': random.uniform(-1,1),
+                'z': random.uniform(-5,5)}
 
 # ---------------- Helper Functions ----------------
 def deg2rad(d): return d * math.pi / 180.0
 def rad2deg(r): return r * 180.0 / math.pi
 
 def meters_per_deg_lat(lat_deg):
-    return 111132.954 - 559.822 * math.cos(2*deg2rad(lat_deg)) + 1.175 * math.cos(4*deg2rad(lat_deg))
+    return 111132.954 - 559.822*math.cos(2*deg2rad(lat_deg)) + 1.175*math.cos(4*deg2rad(lat_deg))
 
 def meters_per_deg_lon(lat_deg):
-    return 111412.84 * math.cos(deg2rad(lat_deg)) - 93.5 * math.cos(3*deg2rad(lat_deg))
+    return 111412.84*math.cos(deg2rad(lat_deg)) - 93.5*math.cos(3*deg2rad(lat_deg))
 
 def compute_checksum(payload):
     c = 0
@@ -61,10 +54,7 @@ def compute_checksum(payload):
 
 class KalmanFilter:
     def __init__(self, q=0.1, r=1.0, x0=0.0, p0=1.0):
-        self.q = q
-        self.r = r
-        self.x = x0
-        self.p = p0
+        self.q, self.r, self.x, self.p = q, r, x0, p0
     def update(self, z):
         self.p += self.q
         k = self.p/(self.p+self.r)
@@ -74,9 +64,7 @@ class KalmanFilter:
 
 class PID:
     def __init__(self, kp, ki, kd, output_limits=(-999,999)):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
+        self.kp, self.ki, self.kd = kp, ki, kd
         self.integral = 0.0
         self.last_error = None
         self.output_limits = output_limits
@@ -128,7 +116,7 @@ def check_crash(accel, altitude, dt):
     return False
 
 # ---------------- Initialization ----------------
-i2c = I2C(0, Pin(17), Pin(16), 400000)  # positional arguments only
+i2c = DummyI2C()
 mpu = QMI8658(i2c, 0x6B)
 
 alpha_attitude = 0.98
@@ -159,17 +147,11 @@ def main_loop():
     try:
         while True:
             now = time.ticks_ms()
-            dt = time.ticks_diff(now, last_time)/1000.0
-            dt = dt_nominal if dt <= 0 else dt
+            dt = max(time.ticks_diff(now, last_time)/1000.0, dt_nominal)
             last_time = now
 
-            try:
-                accel = mpu.get_accel_data()
-                gyro = mpu.get_gyro_data()
-            except Exception as e:
-                print("Sensor read error:", e)
-                time.sleep_ms(50)
-                continue
+            accel = mpu.get_accel_data()
+            gyro = mpu.get_gyro_data()
 
             accel_m = {k:v*9.80665 for k,v in accel.items()}
             gyro_dps = gyro.copy()
@@ -221,9 +203,7 @@ def main_loop():
             packet = build_telemetry_packet(ts, altitude, vel_n, vel_e, lat, lon, pitch, yaw, mission_state, crashed)
             print(packet)
 
-            elapsed = time.ticks_diff(time.ticks_ms(), now)/1000.0
-            sleep_time = dt_nominal - elapsed
-            if sleep_time>0: time.sleep(sleep_time)
+            time.sleep(dt_nominal)
 
             if mission_state=="LANDING":
                 print("Mission complete: landing state reached.")
@@ -231,8 +211,6 @@ def main_loop():
 
     except KeyboardInterrupt:
         print("Interrupted by user. Exiting...")
-    except Exception as e:
-        print("Fatal error:", e)
 
 if __name__=="__main__":
     main_loop()
