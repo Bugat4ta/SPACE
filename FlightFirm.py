@@ -1,6 +1,5 @@
 import time
 import math
-import traceback
 
 from mpu6050 import mpu6050
 # from bmp388 import BMP388  # Removed
@@ -162,7 +161,6 @@ def main_loop():
                 gyro = mpu.get_gyro_data()
             except Exception as e:
                 print("Sensor read error:", e)
-                traceback.print_exc()
                 time.sleep(0.05)
                 continue
 
@@ -201,7 +199,7 @@ def main_loop():
 
             check_crash(accel_m, altitude, dt)
 
-            # Mission logic unchanged
+            # Mission logic
             if mission_state == "BOOT":
                 mission_state = "ASCENT"
             elif mission_state == "ASCENT":
@@ -248,7 +246,6 @@ def main_loop():
         print("Interrupted by user. Exiting...")
     except Exception as e:
         print("Fatal error:", e)
-        traceback.print_exc()
 
 if __name__ == "__main__":
     main_loop()
